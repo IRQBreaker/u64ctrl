@@ -44,20 +44,22 @@ typedef struct {
     FILE *dmafile_fp;
     char dmafilename[MAX_STRING_SIZE];
     uint8_t *dmafile_address;
+    int dmafile_size;
     int do_reset;
+    int do_loadprg;
     int socket;
 } program_data;
 
-int u64_close_socket(program_data *data)
+void close_socket(program_data *data)
 {
     if (data->socket) {
         shutdown(data->socket, SHUT_RDWR);
         close(data->socket);
+        data->socket = 0;
     }
-    return EXIT_SUCCESS;
 }
 
-int u64_open_socket(program_data *data)
+int open_socket(program_data *data)
 {
     struct addrinfo hints;
     struct addrinfo *servinfo = NULL;
@@ -92,7 +94,7 @@ int u64_open_socket(program_data *data)
     freeaddrinfo(servinfo);
 
     if (p == NULL) {
-        fprintf(stderr, "Couldn't connect to the server\n.");
+        fprintf(stderr, "Couldn't connect to Ultimate64\n.");
         return EXIT_FAILURE;
     }
 
@@ -101,31 +103,102 @@ int u64_open_socket(program_data *data)
 
 int open_file(program_data *data)
 {
-    data = data;
-    return EXIT_FAILURE;
+    struct stat st;
+
+    data->dmafile_fp = fopen(data->dmafilename, "r");
+    if (!data->dmafile_fp) {
+        perror("Error");
+        return EXIT_FAILURE;
+    }
+
+	if (fstat(fileno(data->dmafile_fp), &st) != 0) {
+		perror("Error");
+		fclose(data->dmafile_fp);
+		return EXIT_FAILURE;
+	}
+
+	data->dmafile_size = (int)st.st_size;
+
+	data->dmafile_address = mmap(NULL, data->dmafile_size, PROT_READ, MAP_SHARED, fileno(data->dmafile_fp), 0);
+	if (data->dmafile_address == MAP_FAILED) {
+		perror("Error");
+		fclose(data->dmafile_fp);
+		return EXIT_FAILURE;
+	}
+
+    return EXIT_SUCCESS;
 }
 
-int u64_reset(program_data *data)
+void close_file(program_data *data)
 {
-    const uint16_t reset_data[] = {
+    if (data->dmafile_address) {
+        munmap(data->dmafile_address, data->dmafile_size);
+        data->dmafile_address = NULL;
+    }
+
+    if (data->dmafile_fp) {
+        fclose(data->dmafile_fp);
+        data->dmafile_fp = NULL;
+        data->dmafile_size = 0;
+    }
+}
+
+int reset(program_data *data)
+{
+    uint16_t reset_data[] = {
         htole16(SOCKET_CMD_RESET),
         0x0000
     };
 
     size_t size = sizeof(reset_data) / sizeof(reset_data[0]);
 
-    if (u64_open_socket(data) != EXIT_SUCCESS) {
+    if (open_socket(data) != EXIT_SUCCESS) {
         return EXIT_FAILURE;
     }
 
     for (size_t i = 0; i < size; i++) {
         if (send(data->socket, &reset_data[i], size, 0) == -1) {
             perror("Error");
+            close_socket(data);
             return EXIT_FAILURE;
         }
     }
 
-    u64_close_socket(data);
+    close_socket(data);
+
+    return EXIT_SUCCESS;
+}
+
+int load_prg(program_data* data)
+{
+    uint16_t loadprg_data[] = {
+        htole16(SOCKET_CMD_DMARUN),
+        htole16(data->dmafile_size)
+    };
+
+    size_t data_size = sizeof(loadprg_data) / sizeof(loadprg_data[0]);
+
+    if (open_socket(data) != EXIT_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+
+    // Send load&run command and size
+    for (size_t i = 0; i < data_size; i++) {
+        if (send(data->socket, &loadprg_data[i], data_size, 0) == -1) {
+            perror("Error");
+            close_socket(data);
+            return EXIT_FAILURE;
+        }
+    }
+
+    // Send actual file
+    if (send(data->socket, data->dmafile_address, data->dmafile_size, 0) == -1) {
+        perror("Error");
+        close_socket(data);
+        return EXIT_FAILURE;
+    }
+
+    close_socket(data);
 
     return EXIT_SUCCESS;
 }
@@ -142,7 +215,6 @@ void print_help(char *program_name)
 int parse_arguments(int argc, char **argv, program_data *data)
 {
     int c = 0;
-    //char *endptr = NULL;
     char *program_name = argv[0];
 
     opterr = 0;
@@ -158,6 +230,10 @@ int parse_arguments(int argc, char **argv, program_data *data)
                 break;
             case 'p':
                 strncpy(data->dmafilename, optarg, MAX_STRING_SIZE - 1);
+                if (open_file(data) != EXIT_SUCCESS) {
+                    return EXIT_FAILURE;
+                }
+                data->do_loadprg = 1;
                 break;
             case '?':
                 if (optopt == 'i' || optopt == 'p') {
@@ -197,7 +273,11 @@ int main(int argc, char **argv)
     }
 
     if (data.do_reset) {
-        u64_reset(&data);
+        reset(&data);
+    }
+
+    if (data.do_loadprg) {
+        load_prg(&data);
     }
 
     return EXIT_SUCCESS;
