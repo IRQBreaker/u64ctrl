@@ -27,6 +27,7 @@
 #define SOCKET_CMD_DMAJUMP     0xFF09
 #define SOCKET_CMD_MOUNT_IMG   0xFF0A
 #define SOCKET_CMD_RUN_IMG     0xFF0B
+#define SOCKET_CMD_POWEROFF    0xFF0C
 
 // Only available on U64
 #define SOCKET_CMD_VICSTREAM_ON    0xFF20
@@ -36,18 +37,36 @@
 #define SOCKET_CMD_AUDIOSTREAM_OFF 0xFF31
 #define SOCKET_CMD_DEBUGSTREAM_OFF 0xFF32
 
+// Undocumented, shall only be used by developers.
+#define SOCKET_CMD_LOADSIDCRT   0xFF71
+#define SOCKET_CMD_LOADBOOTCRT  0xFF72
+#define SOCKET_CMD_READFLASH    0xFF75
+#define SOCKET_CMD_DEBUG_REG    0xFF76
+
 #define MAX_STRING_SIZE 128
 #define COMMAND_PORT 64
+#define MAX_MEM 65536
+#define MAX_D64 200000
+#define FTYPE_LEN 3
+
+typedef enum {
+    PRG,
+    D64,
+    NUM_OF_FILE_TYPES
+} file_type;
 
 typedef struct {
     char hostname[MAX_STRING_SIZE];
-    FILE *dmafile_fp;
-    char dmafilename[MAX_STRING_SIZE];
-    uint8_t *dmafile_address;
-    int dmafile_size;
+    FILE *file_fp;
+    char filename[MAX_STRING_SIZE];
+    uint8_t *file_address;
+    int file_size;
     int do_reset;
-    int do_loadprg;
+    int do_load;
+    //int do_loadd64;
+    int do_poweroff;
     int socket;
+    file_type ftype;
 } program_data;
 
 void close_socket(program_data *data)
@@ -105,24 +124,24 @@ int open_file(program_data *data)
 {
     struct stat st;
 
-    data->dmafile_fp = fopen(data->dmafilename, "r");
-    if (!data->dmafile_fp) {
+    data->file_fp = fopen(data->filename, "r");
+    if (!data->file_fp) {
         perror("Error");
         return EXIT_FAILURE;
     }
 
-	if (fstat(fileno(data->dmafile_fp), &st) != 0) {
+	if (fstat(fileno(data->file_fp), &st) != 0) {
 		perror("Error");
-		fclose(data->dmafile_fp);
+		fclose(data->file_fp);
 		return EXIT_FAILURE;
 	}
 
-	data->dmafile_size = (int)st.st_size;
+	data->file_size = (int)st.st_size;
 
-	data->dmafile_address = mmap(NULL, data->dmafile_size, PROT_READ, MAP_SHARED, fileno(data->dmafile_fp), 0);
-	if (data->dmafile_address == MAP_FAILED) {
+	data->file_address = mmap(NULL, data->file_size, PROT_READ, MAP_SHARED, fileno(data->file_fp), 0);
+	if (data->file_address == MAP_FAILED) {
 		perror("Error");
-		fclose(data->dmafile_fp);
+		fclose(data->file_fp);
 		return EXIT_FAILURE;
 	}
 
@@ -131,15 +150,15 @@ int open_file(program_data *data)
 
 void close_file(program_data *data)
 {
-    if (data->dmafile_address) {
-        munmap(data->dmafile_address, data->dmafile_size);
-        data->dmafile_address = NULL;
+    if (data->file_address) {
+        munmap(data->file_address, data->file_size);
+        data->file_address = NULL;
     }
 
-    if (data->dmafile_fp) {
-        fclose(data->dmafile_fp);
-        data->dmafile_fp = NULL;
-        data->dmafile_size = 0;
+    if (data->file_fp) {
+        fclose(data->file_fp);
+        data->file_fp = NULL;
+        data->file_size = 0;
     }
 }
 
@@ -169,11 +188,37 @@ int reset(program_data *data)
     return EXIT_SUCCESS;
 }
 
+int power_off(program_data *data)
+{
+    uint16_t reset_data[] = {
+        htole16(SOCKET_CMD_POWEROFF),
+        0x0000
+    };
+
+    size_t size = sizeof(reset_data) / sizeof(reset_data[0]);
+
+    if (open_socket(data) != EXIT_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+
+    for (size_t i = 0; i < size; i++) {
+        if (send(data->socket, &reset_data[i], size, 0) == -1) {
+            perror("Error");
+            close_socket(data);
+            return EXIT_FAILURE;
+        }
+    }
+
+    close_socket(data);
+
+    return EXIT_SUCCESS;
+}
+
 int load_prg(program_data* data)
 {
     uint16_t loadprg_data[] = {
         htole16(SOCKET_CMD_DMARUN),
-        htole16(data->dmafile_size)
+        htole16(data->file_size)
     };
 
     size_t data_size = sizeof(loadprg_data) / sizeof(loadprg_data[0]);
@@ -192,7 +237,45 @@ int load_prg(program_data* data)
     }
 
     // Send actual file
-    if (send(data->socket, data->dmafile_address, data->dmafile_size, 0) == -1) {
+    if (send(data->socket, data->file_address, data->file_size, 0) == -1) {
+        perror("Error");
+        close_socket(data);
+        return EXIT_FAILURE;
+    }
+
+    close_socket(data);
+    close_file(data);
+
+    return EXIT_SUCCESS;
+}
+
+int load_d64(program_data *data)
+{
+    uint16_t command = htole16(SOCKET_CMD_RUN_IMG);
+    uint32_t file_len = htole32(data->file_size);
+
+    if (open_socket(data) != EXIT_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+
+    // Command
+    if (send(data->socket, &command, sizeof(uint16_t), 0) == -1) {
+        perror("Error");
+        close_socket(data);
+        return EXIT_FAILURE;
+    }
+
+    // File length, 3 bytes.
+    // Quoting from "1541ultimate/python/sock.py":
+    // # Send only 3 of the 4 bytes. Who invented this?!
+    if (send(data->socket, &file_len, 3, 0) == -1) {
+        perror("Error");
+        close_socket(data);
+        return EXIT_FAILURE;
+    }
+
+    // Send actual file
+    if (send(data->socket, data->file_address, data->file_size, 0) == -1) {
         perror("Error");
         close_socket(data);
         return EXIT_FAILURE;
@@ -200,15 +283,54 @@ int load_prg(program_data* data)
 
     close_socket(data);
 
+    return EXIT_FAILURE;
+}
+
+int load(program_data *data)
+{
+    if (open_file(data) != EXIT_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+
+    switch (data->ftype) {
+        case PRG:
+            if (data->file_size > MAX_MEM) {
+                fprintf(stderr, "Error: PRG file too big, %d bytes\n", data->file_size);
+                close_file(data);
+                return EXIT_FAILURE;
+            }
+            if (load_prg(data) != EXIT_SUCCESS) {
+                close_file(data);
+                return EXIT_FAILURE;
+            }
+            break;
+        case D64:
+            if (data->file_size > MAX_D64) {
+                fprintf(stderr, "Error: D64 file too big, %d bytes\n", data->file_size);
+                close_file(data);
+                return EXIT_FAILURE;
+            }
+            if (load_d64(data) != EXIT_SUCCESS) {
+                close_file(data);
+                return EXIT_FAILURE;
+            }
+            break;
+        default:
+            return EXIT_FAILURE;
+    }
+
+    close_file(data);
+
     return EXIT_SUCCESS;
 }
 
 void print_help(char *program_name)
 {
-    fprintf(stderr, "Usage: %s [-i ip address] [-r] [-p PRG name] [-h]\n", program_name);
+    fprintf(stderr, "Usage: %s [-i ip address] [-l PRG/D64 name] [-r] [-x] [-h]\n", program_name);
     fprintf(stderr, "   -i IP address   Ultimate 64 IP address\n");
+    fprintf(stderr, "   -l PRG/D64 file DMA load and run program/image\n");
     fprintf(stderr, "   -r              Reset Ultimate 64\n");
-    fprintf(stderr, "   -p PRG name     DMA load and run program\n");
+    fprintf(stderr, "   -x              Power off Ultimate 64\n");
     fprintf(stderr, "   -h              Print this help text\n");
 }
 
@@ -216,24 +338,36 @@ int parse_arguments(int argc, char **argv, program_data *data)
 {
     int c = 0;
     char *program_name = argv[0];
+    int file_len = 0;
 
     opterr = 0;
     errno = 0;
 
-    while ((c = getopt(argc, argv, "i:hrp:")) != -1) {
+    while ((c = getopt(argc, argv, "i:l:rxh")) != -1) {
         switch (c) {
             case 'i':
                 strncpy(data->hostname, optarg, MAX_STRING_SIZE - 1);
                 break;
+            case 'l':
+                strncpy(data->filename, optarg, MAX_STRING_SIZE - 1);
+                file_len = strlen(data->filename);
+                if (file_len < FTYPE_LEN) {
+                    data->ftype = PRG;
+                } else {
+                    if ((strncmp(&data->filename[file_len - FTYPE_LEN], "d64", FTYPE_LEN) == 0 ||
+                            strncmp(&data->filename[file_len - FTYPE_LEN], "D64", FTYPE_LEN) == 0)) {
+                        data->ftype = D64;
+                    } else {
+                        data->ftype = PRG;
+                    }
+                }
+                data->do_load = 1;
+                break;
             case 'r':
                 data->do_reset = 1;
                 break;
-            case 'p':
-                strncpy(data->dmafilename, optarg, MAX_STRING_SIZE - 1);
-                if (open_file(data) != EXIT_SUCCESS) {
-                    return EXIT_FAILURE;
-                }
-                data->do_loadprg = 1;
+            case 'x':
+                data->do_poweroff = 1;
                 break;
             case '?':
                 if (optopt == 'i' || optopt == 'p') {
@@ -255,7 +389,7 @@ int parse_arguments(int argc, char **argv, program_data *data)
         return EXIT_FAILURE;
     }
 
-    if (data->do_reset && strlen(data->dmafilename)) {
+    if (data->do_reset && data->do_load) {
         fprintf(stderr, "Can't reset and load/run at the same time\n");
         return EXIT_FAILURE;
     }
@@ -272,13 +406,18 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    if (data.do_poweroff) {
+        return power_off(&data);
+    }
+
     if (data.do_reset) {
-        reset(&data);
+        return reset(&data);
     }
 
-    if (data.do_loadprg) {
-        load_prg(&data);
+    if (data.do_load) {
+        return load(&data);
     }
 
+    printf("Ok?\n");
     return EXIT_SUCCESS;
 }
