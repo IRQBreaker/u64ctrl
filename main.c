@@ -51,14 +51,12 @@
 #define FTYPE_LEN 3
 
 typedef enum {
-    PRG,
     PRG_LOAD,
     PRG_RUN,
-    D64,
     D64_LOAD,
     D64_RUN,
-    NUM_OF_FILE_TYPES
-} file_type;
+    NUM_OF_FILE_ACTIONS
+} file_action;
 
 typedef struct {
     char hostname[MAX_STRING_SIZE];
@@ -72,7 +70,7 @@ typedef struct {
     int do_poweroff;
     int do_file;
     int socket;
-    file_type ftype;
+    file_action f_action;
 } program_data;
 
 void close_socket(program_data *data)
@@ -236,7 +234,7 @@ int prg(program_data* data)
 
     printf("prg\n");
 
-    switch(data->ftype) {
+    switch(data->f_action) {
         case PRG_RUN:
             command = (uint16_t *)&runprg_data;
             break;
@@ -284,7 +282,7 @@ int d64(program_data *data)
 
     printf("d64\n");
 
-    switch(data->ftype) {
+    switch(data->f_action) {
         case D64_LOAD:
             command = mount_command;
             break;
@@ -335,7 +333,7 @@ int load(program_data *data)
         return EXIT_FAILURE;
     }
 
-    switch (data->ftype) {
+    switch (data->f_action) {
         case PRG_RUN:
             /* fall through */
         case PRG_LOAD:
@@ -412,7 +410,7 @@ int parse_arguments(int argc, char **argv, program_data *data)
                 data->do_poweroff = 1;
                 break;
             case '?':
-                if (optopt == 'i' || optopt == 'p') {
+                if (optopt == 'i' || optopt == 'l' || optopt == 'm') {
                     fprintf(stderr, "Option -%c requires an argument\n", optopt);
                 } else {
                     fprintf(stderr, "Invalid argument '-%c'\n", optopt);
@@ -444,9 +442,9 @@ int parse_arguments(int argc, char **argv, program_data *data)
         // Assume PRG if filename is less than 3 characters.
         if (file_len < FTYPE_LEN) {
             if(data->do_run) {
-                data->ftype = PRG_RUN;
+                data->f_action = PRG_RUN;
             } else {
-                data->ftype = PRG_LOAD;
+                data->f_action = PRG_LOAD;
             }
 
             return EXIT_SUCCESS;
@@ -456,15 +454,15 @@ int parse_arguments(int argc, char **argv, program_data *data)
         if ((strncmp(&data->filename[file_len - FTYPE_LEN], "d64", FTYPE_LEN) == 0 ||
                 strncmp(&data->filename[file_len - FTYPE_LEN], "D64", FTYPE_LEN) == 0)) {
             if (data->do_run) {
-                data->ftype = D64_RUN;
+                data->f_action = D64_RUN;
             } else {
-                data->ftype = D64_LOAD;
+                data->f_action = D64_LOAD;
             }
         } else {
             if (data->do_run) {
-                data->ftype = PRG_RUN;
+                data->f_action = PRG_RUN;
             } else {
-                data->ftype = PRG_LOAD;
+                data->f_action = PRG_LOAD;
             }
         }
     }
