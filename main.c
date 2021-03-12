@@ -75,7 +75,7 @@ typedef struct {
     file_action f_action;
 } program_data;
 
-#if defined(DEBUG)
+#if defined(DEBUG_HEXDUMP)
 void dump_hex(const void* data, size_t size)
 {
     char ascii[17];
@@ -332,9 +332,11 @@ int prg(program_data* data)
     for (size_t i = 0; i < data_size; i++) {
         printf("%04x\n", command[i]);
     }
+#if defined(DEBUG_HEXDUMP)
     printf("\nContents:\n");
     dump_hex(data->file_address, data->file_size);
     printf("\n");
+#endif
 #endif
 
     // Send load&run command and size
@@ -394,10 +396,12 @@ int d64(program_data *data)
     printf("%s D64\n", info);
     printf("Sending D64 command:\n");
     printf("%04x\n", command);
-    printf("%04x\n\n", file_len);
+    printf("%04x\n", file_len);
+#if defined(DEBUG_HEXDUMP)
     printf("Contents:\n");
     dump_hex(data->file_address, data->file_size);
     printf("\n");
+#endif
 #endif
 
     // Command
