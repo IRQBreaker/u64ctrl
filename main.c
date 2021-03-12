@@ -15,6 +15,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+//#define DEBUG
+
 // "Ok ok, use them then..."
 #define SOCKET_CMD_DMA         0xFF01
 #define SOCKET_CMD_DMARUN      0xFF02
@@ -63,7 +65,7 @@ typedef struct {
     FILE *file_fp;
     char filename[MAX_STRING_SIZE];
     uint8_t *file_address;
-    int file_size;
+    size_t file_size;
     int do_reset;
     int do_load;
     int do_run;
@@ -73,8 +75,44 @@ typedef struct {
     file_action f_action;
 } program_data;
 
+#if defined(DEBUG)
+void dump_hex(const void* data, size_t size)
+{
+    char ascii[17];
+    size_t i, j;
+    ascii[16] = '\0';
+    for (i = 0; i < size; ++i) {
+        printf("%02X ", ((unsigned char*)data)[i]);
+        if (((unsigned char*)data)[i] >= ' ' && ((unsigned char*)data)[i] <= '~') {
+            ascii[i % 16] = ((unsigned char*)data)[i];
+        } else {
+            ascii[i % 16] = '.';
+        }
+        if ((i+1) % 8 == 0 || i+1 == size) {
+            printf(" ");
+            if ((i+1) % 16 == 0) {
+                printf("|  %s \n", ascii);
+            } else if (i+1 == size) {
+                ascii[(i+1) % 16] = '\0';
+                if ((i+1) % 16 <= 8) {
+                    printf(" ");
+                }
+                for (j = (i+1) % 16; j < 16; ++j) {
+                    printf("   ");
+                }
+                printf("|  %s \n", ascii);
+            }
+        }
+    }
+}
+#endif
+
 void close_socket(program_data *data)
 {
+#if defined(DEBUG)
+    printf("Closing socket: %s:%d\n", data->hostname, COMMAND_PORT);
+#endif
+
     if (data->socket) {
         shutdown(data->socket, SHUT_RDWR);
         close(data->socket);
@@ -89,6 +127,10 @@ int open_socket(program_data *data)
     struct addrinfo *p = NULL;
     int result = 0;
     char port[MAX_STRING_SIZE] = {0};
+
+#if defined(DEBUG)
+    printf("Opening socket: %s:%d\n", data->hostname, COMMAND_PORT);
+#endif
 
     snprintf(port, MAX_STRING_SIZE - 1, "%d", COMMAND_PORT);
 
@@ -110,14 +152,14 @@ int open_socket(program_data *data)
             continue;
         }
 
-        // Connected succesfully!
+        // Connected successfully!
         break;
     }
 
     freeaddrinfo(servinfo);
 
     if (p == NULL) {
-        fprintf(stderr, "Couldn't connect to Ultimate64\n.");
+        fprintf(stderr, "Couldn't connect to Ultimate 64\n.");
         return EXIT_FAILURE;
     }
 
@@ -128,32 +170,44 @@ int open_file(program_data *data)
 {
     struct stat st;
 
+#if defined(DEBUG)
+    printf("Opening file: %s\n", data->filename);
+#endif
+
     data->file_fp = fopen(data->filename, "r");
     if (!data->file_fp) {
         perror("Error");
         return EXIT_FAILURE;
     }
 
-	if (fstat(fileno(data->file_fp), &st) != 0) {
-		perror("Error");
-		fclose(data->file_fp);
-		return EXIT_FAILURE;
-	}
+    if (fstat(fileno(data->file_fp), &st) != 0) {
+        perror("Error");
+        fclose(data->file_fp);
+        return EXIT_FAILURE;
+    }
 
-	data->file_size = (int)st.st_size;
+    data->file_size = st.st_size;
 
-	data->file_address = mmap(NULL, data->file_size, PROT_READ, MAP_SHARED, fileno(data->file_fp), 0);
-	if (data->file_address == MAP_FAILED) {
-		perror("Error");
-		fclose(data->file_fp);
-		return EXIT_FAILURE;
-	}
+#if defined(DEBUG)
+    printf("File size: %lu\n", data->file_size);
+#endif
+
+    data->file_address = mmap(NULL, data->file_size, PROT_READ, MAP_SHARED, fileno(data->file_fp), 0);
+    if (data->file_address == MAP_FAILED) {
+        perror("Error");
+        fclose(data->file_fp);
+        return EXIT_FAILURE;
+    }
 
     return EXIT_SUCCESS;
 }
 
 void close_file(program_data *data)
 {
+#if defined(DEBUG)
+    printf("Closing file: %s\n", data->filename);
+#endif
+
     if (data->file_address) {
         munmap(data->file_address, data->file_size);
         data->file_address = NULL;
@@ -179,6 +233,13 @@ int reset(program_data *data)
         return EXIT_FAILURE;
     }
 
+#if defined(DEBUG)
+    printf("Sending reset command:\n");
+    for (size_t i = 0; i < size; i++) {
+        printf("%04x\n", reset_data[i]);
+    }
+#endif
+
     for (size_t i = 0; i < size; i++) {
         if (send(data->socket, &reset_data[i], size, 0) == -1) {
             perror("Error");
@@ -194,19 +255,26 @@ int reset(program_data *data)
 
 int power_off(program_data *data)
 {
-    uint16_t reset_data[] = {
+    uint16_t poweroff_data[] = {
         htole16(SOCKET_CMD_POWEROFF),
         0x0000
     };
 
-    size_t size = sizeof(reset_data) / sizeof(reset_data[0]);
+    size_t size = sizeof(poweroff_data) / sizeof(poweroff_data[0]);
 
     if (open_socket(data) != EXIT_SUCCESS) {
         return EXIT_FAILURE;
     }
 
+#if defined(DEBUG)
+    printf("Sending power off command:\n");
     for (size_t i = 0; i < size; i++) {
-        if (send(data->socket, &reset_data[i], size, 0) == -1) {
+        printf("%04x\n", poweroff_data[i]);
+    }
+#endif
+
+    for (size_t i = 0; i < size; i++) {
+        if (send(data->socket, &poweroff_data[i], size, 0) == -1) {
             perror("Error");
             close_socket(data);
             return EXIT_FAILURE;
@@ -231,15 +299,22 @@ int prg(program_data* data)
     };
 
     uint16_t *command = NULL;
-
-    printf("prg\n");
+#if defined(DEBUG)
+    char *info = NULL;
+#endif
 
     switch(data->f_action) {
         case PRG_RUN:
             command = (uint16_t *)&runprg_data;
+#if defined(DEBUG)
+            info = "Running";
+#endif
             break;
         case PRG_LOAD:
             command = (uint16_t *)&loadprg_data;
+#if defined(DEBUG)
+            info = "Loading";
+#endif
             break;
         default:
             return EXIT_FAILURE;
@@ -250,6 +325,17 @@ int prg(program_data* data)
     if (open_socket(data) != EXIT_SUCCESS) {
         return EXIT_FAILURE;
     }
+
+#if defined(DEBUG)
+    printf("%s PRG\n", info);
+    printf("Sending PRG command:\n");
+    for (size_t i = 0; i < data_size; i++) {
+        printf("%04x\n", command[i]);
+    }
+    printf("\nContents:\n");
+    dump_hex(data->file_address, data->file_size);
+    printf("\n");
+#endif
 
     // Send load&run command and size
     for (size_t i = 0; i < data_size; i++) {
@@ -279,23 +365,40 @@ int d64(program_data *data)
     uint32_t file_len = htole32(data->file_size);
 
     uint16_t command = 0;
+#if defined(DEBUG)
+    char *info = NULL;
+#endif
 
-    printf("d64\n");
+    if (open_socket(data) != EXIT_SUCCESS) {
+        return EXIT_FAILURE;
+    }
 
     switch(data->f_action) {
         case D64_LOAD:
             command = mount_command;
+#if defined(DEBUG)
+            info = "Mounting";
+#endif
             break;
         case D64_RUN:
             command = run_command;
+#if defined(DEBUG)
+            info = "Running";
+#endif
             break;
         default:
             return EXIT_FAILURE;
     }
 
-    if (open_socket(data) != EXIT_SUCCESS) {
-        return EXIT_FAILURE;
-    }
+#if defined(DEBUG)
+    printf("%s D64\n", info);
+    printf("Sending D64 command:\n");
+    printf("%04x\n", command);
+    printf("%04x\n\n", file_len);
+    printf("Contents:\n");
+    dump_hex(data->file_address, data->file_size);
+    printf("\n");
+#endif
 
     // Command
     if (send(data->socket, &command, sizeof(uint16_t), 0) == -1) {
@@ -327,7 +430,9 @@ int d64(program_data *data)
 
 int load(program_data *data)
 {
-    printf("load\n");
+#if defined(DEBUG)
+    printf("Load: %s\n", data->filename);
+#endif
 
     if (open_file(data) != EXIT_SUCCESS) {
         return EXIT_FAILURE;
@@ -338,7 +443,7 @@ int load(program_data *data)
             /* fall through */
         case PRG_LOAD:
             if (data->file_size > MAX_MEM) {
-                fprintf(stderr, "Error: PRG file too big, %d bytes\n", data->file_size);
+                fprintf(stderr, "Error: PRG file too big, %lu bytes\n", data->file_size);
                 close_file(data);
                 return EXIT_FAILURE;
             }
@@ -351,7 +456,7 @@ int load(program_data *data)
             /* fall through */
         case D64_LOAD:
             if (data->file_size > MAX_D64) {
-                fprintf(stderr, "Error: D64 file too big, %d bytes\n", data->file_size);
+                fprintf(stderr, "Error: D64 file too big, %lu bytes\n", data->file_size);
                 close_file(data);
                 return EXIT_FAILURE;
             }
@@ -372,7 +477,7 @@ int load(program_data *data)
 
 void print_help(char *program_name)
 {
-    fprintf(stderr, "Usage: %s [-i ip address] [-l PRG/D64 name] [-r] [-x] [-h]\n", program_name);
+    fprintf(stderr, "Usage: %s [-i IP address] [-l PRG/D64 name] [-r] [-x] [-h]\n", program_name);
     fprintf(stderr, "   -i IP address   Ultimate 64 IP address\n");
     fprintf(stderr, "   -l PRG/D64 file DMA load and run program/image\n");
     fprintf(stderr, "   -m PRG/D64 file DMA load program or mount image\n");
@@ -446,24 +551,33 @@ int parse_arguments(int argc, char **argv, program_data *data)
             } else {
                 data->f_action = PRG_LOAD;
             }
+#if defined(DEBUG)
+            printf("File type: PRG\n");
+#endif
 
             return EXIT_SUCCESS;
         }
 
         // Check if filename contains d64/D64
         if ((strncmp(&data->filename[file_len - FTYPE_LEN], "d64", FTYPE_LEN) == 0 ||
-                strncmp(&data->filename[file_len - FTYPE_LEN], "D64", FTYPE_LEN) == 0)) {
+                    strncmp(&data->filename[file_len - FTYPE_LEN], "D64", FTYPE_LEN) == 0)) {
             if (data->do_run) {
                 data->f_action = D64_RUN;
             } else {
                 data->f_action = D64_LOAD;
             }
+#if defined(DEBUG)
+            printf("File type: D64\n");
+#endif
         } else {
             if (data->do_run) {
                 data->f_action = PRG_RUN;
             } else {
                 data->f_action = PRG_LOAD;
             }
+#if defined(DEBUG)
+            printf("File type: PRG\n");
+#endif
         }
     }
 
