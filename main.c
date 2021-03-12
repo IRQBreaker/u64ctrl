@@ -27,6 +27,7 @@
 #define SOCKET_CMD_DMAJUMP     0xFF09
 #define SOCKET_CMD_MOUNT_IMG   0xFF0A
 #define SOCKET_CMD_RUN_IMG     0xFF0B
+// Exists only on my fork of 1541ultimate
 #define SOCKET_CMD_POWEROFF    0xFF0C
 
 // Only available on U64
@@ -51,7 +52,11 @@
 
 typedef enum {
     PRG,
+    PRG_LOAD,
+    PRG_RUN,
     D64,
+    D64_LOAD,
+    D64_RUN,
     NUM_OF_FILE_TYPES
 } file_type;
 
@@ -63,8 +68,9 @@ typedef struct {
     int file_size;
     int do_reset;
     int do_load;
-    //int do_loadd64;
+    int do_run;
     int do_poweroff;
+    int do_file;
     int socket;
     file_type ftype;
 } program_data;
@@ -214,14 +220,34 @@ int power_off(program_data *data)
     return EXIT_SUCCESS;
 }
 
-int load_prg(program_data* data)
+int prg(program_data* data)
 {
-    uint16_t loadprg_data[] = {
+    uint16_t runprg_data[] = {
         htole16(SOCKET_CMD_DMARUN),
         htole16(data->file_size)
     };
 
-    size_t data_size = sizeof(loadprg_data) / sizeof(loadprg_data[0]);
+    uint16_t loadprg_data[] = {
+        htole16(SOCKET_CMD_DMA),
+        htole16(data->file_size)
+    };
+
+    uint16_t *command = NULL;
+
+    printf("prg\n");
+
+    switch(data->ftype) {
+        case PRG_RUN:
+            command = (uint16_t *)&runprg_data;
+            break;
+        case PRG_LOAD:
+            command = (uint16_t *)&loadprg_data;
+            break;
+        default:
+            return EXIT_FAILURE;
+    }
+
+    size_t data_size = sizeof(runprg_data) / sizeof(runprg_data[0]);
 
     if (open_socket(data) != EXIT_SUCCESS) {
         return EXIT_FAILURE;
@@ -229,7 +255,7 @@ int load_prg(program_data* data)
 
     // Send load&run command and size
     for (size_t i = 0; i < data_size; i++) {
-        if (send(data->socket, &loadprg_data[i], data_size, 0) == -1) {
+        if (send(data->socket, &command[i], data_size, 0) == -1) {
             perror("Error");
             close_socket(data);
             return EXIT_FAILURE;
@@ -244,15 +270,30 @@ int load_prg(program_data* data)
     }
 
     close_socket(data);
-    close_file(data);
 
     return EXIT_SUCCESS;
 }
 
-int load_d64(program_data *data)
+int d64(program_data *data)
 {
-    uint16_t command = htole16(SOCKET_CMD_RUN_IMG);
+    uint16_t run_command = htole16(SOCKET_CMD_RUN_IMG);
+    uint16_t mount_command = htole16(SOCKET_CMD_MOUNT_IMG);
     uint32_t file_len = htole32(data->file_size);
+
+    uint16_t command = 0;
+
+    printf("d64\n");
+
+    switch(data->ftype) {
+        case D64_LOAD:
+            command = mount_command;
+            break;
+        case D64_RUN:
+            command = run_command;
+            break;
+        default:
+            return EXIT_FAILURE;
+    }
 
     if (open_socket(data) != EXIT_SUCCESS) {
         return EXIT_FAILURE;
@@ -288,34 +329,41 @@ int load_d64(program_data *data)
 
 int load(program_data *data)
 {
+    printf("load\n");
+
     if (open_file(data) != EXIT_SUCCESS) {
         return EXIT_FAILURE;
     }
 
     switch (data->ftype) {
-        case PRG:
+        case PRG_RUN:
+            /* fall through */
+        case PRG_LOAD:
             if (data->file_size > MAX_MEM) {
                 fprintf(stderr, "Error: PRG file too big, %d bytes\n", data->file_size);
                 close_file(data);
                 return EXIT_FAILURE;
             }
-            if (load_prg(data) != EXIT_SUCCESS) {
+            if (prg(data) != EXIT_SUCCESS) {
                 close_file(data);
                 return EXIT_FAILURE;
             }
             break;
-        case D64:
+        case D64_RUN:
+            /* fall through */
+        case D64_LOAD:
             if (data->file_size > MAX_D64) {
                 fprintf(stderr, "Error: D64 file too big, %d bytes\n", data->file_size);
                 close_file(data);
                 return EXIT_FAILURE;
             }
-            if (load_d64(data) != EXIT_SUCCESS) {
+            if (d64(data) != EXIT_SUCCESS) {
                 close_file(data);
                 return EXIT_FAILURE;
             }
             break;
         default:
+            close_file(data);
             return EXIT_FAILURE;
     }
 
@@ -329,6 +377,7 @@ void print_help(char *program_name)
     fprintf(stderr, "Usage: %s [-i ip address] [-l PRG/D64 name] [-r] [-x] [-h]\n", program_name);
     fprintf(stderr, "   -i IP address   Ultimate 64 IP address\n");
     fprintf(stderr, "   -l PRG/D64 file DMA load and run program/image\n");
+    fprintf(stderr, "   -m PRG/D64 file DMA load program or mount image\n");
     fprintf(stderr, "   -r              Reset Ultimate 64\n");
     fprintf(stderr, "   -x              Power off Ultimate 64\n");
     fprintf(stderr, "   -h              Print this help text\n");
@@ -343,24 +392,17 @@ int parse_arguments(int argc, char **argv, program_data *data)
     opterr = 0;
     errno = 0;
 
-    while ((c = getopt(argc, argv, "i:l:rxh")) != -1) {
+    while ((c = getopt(argc, argv, "i:l:m:rxh")) != -1) {
         switch (c) {
             case 'i':
                 strncpy(data->hostname, optarg, MAX_STRING_SIZE - 1);
                 break;
             case 'l':
                 strncpy(data->filename, optarg, MAX_STRING_SIZE - 1);
-                file_len = strlen(data->filename);
-                if (file_len < FTYPE_LEN) {
-                    data->ftype = PRG;
-                } else {
-                    if ((strncmp(&data->filename[file_len - FTYPE_LEN], "d64", FTYPE_LEN) == 0 ||
-                            strncmp(&data->filename[file_len - FTYPE_LEN], "D64", FTYPE_LEN) == 0)) {
-                        data->ftype = D64;
-                    } else {
-                        data->ftype = PRG;
-                    }
-                }
+                data->do_run = 1;
+                break;
+            case 'm':
+                strncpy(data->filename, optarg, MAX_STRING_SIZE - 1);
                 data->do_load = 1;
                 break;
             case 'r':
@@ -389,9 +431,42 @@ int parse_arguments(int argc, char **argv, program_data *data)
         return EXIT_FAILURE;
     }
 
-    if (data->do_reset && data->do_load) {
+    if (data->do_reset && (data->do_load || data->do_run)) {
         fprintf(stderr, "Can't reset and load/run at the same time\n");
         return EXIT_FAILURE;
+    }
+
+    if (data->do_load || data->do_run) {
+        data->do_file = 1;
+
+        file_len = strlen(data->filename);
+
+        // Assume PRG if filename is less than 3 characters.
+        if (file_len < FTYPE_LEN) {
+            if(data->do_run) {
+                data->ftype = PRG_RUN;
+            } else {
+                data->ftype = PRG_LOAD;
+            }
+
+            return EXIT_SUCCESS;
+        }
+
+        // Check if filename contains d64/D64
+        if ((strncmp(&data->filename[file_len - FTYPE_LEN], "d64", FTYPE_LEN) == 0 ||
+                strncmp(&data->filename[file_len - FTYPE_LEN], "D64", FTYPE_LEN) == 0)) {
+            if (data->do_run) {
+                data->ftype = D64_RUN;
+            } else {
+                data->ftype = D64_LOAD;
+            }
+        } else {
+            if (data->do_run) {
+                data->ftype = PRG_RUN;
+            } else {
+                data->ftype = PRG_LOAD;
+            }
+        }
     }
 
     return EXIT_SUCCESS;
@@ -414,7 +489,7 @@ int main(int argc, char **argv)
         return reset(&data);
     }
 
-    if (data.do_load) {
+    if (data.do_file) {
         return load(&data);
     }
 
