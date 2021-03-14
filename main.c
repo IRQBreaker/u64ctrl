@@ -87,7 +87,11 @@ typedef struct {
 endian get_host_endian(void) {
     volatile uint32_t i = 0x01234567;
     // evaluates to 0 for big endian, 1 for little endian.
-    return (endian)(*((uint8_t*)(&i))) == 0x67;
+    if ((*((uint8_t*)(&i))) == 0x67) {
+        return LE;
+    }
+
+    return BE;
 }
 
 uint16_t host_to_le16(uint16_t value)
@@ -178,7 +182,7 @@ int open_file(program_data *data)
 
     data->file_size = st.st_size;
 
-    data->file_address = mmap(NULL, data->file_size, PROT_READ, MAP_SHARED, fileno(data->file_fp), 0);
+    data->file_address = (uint8_t *)mmap(NULL, data->file_size, PROT_READ, MAP_SHARED, fileno(data->file_fp), 0);
     if (data->file_address == MAP_FAILED) {
         perror("Error");
         fclose(data->file_fp);
